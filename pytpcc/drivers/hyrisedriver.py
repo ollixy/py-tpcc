@@ -108,20 +108,18 @@ class HyriseDriver(AbstractDriver):
             self.url = url
 
         def execute(self, querystr, paramlist=None):
-            import pdb; pdb.set_trace()
             q = querystr
             if paramlist:
                 assert isinstance(paramlist, dict)
                 for k,v in paramlist.iteritems():
-                    if v in [True, False]:
-                        v = str(v).lower()
-                    if isinstance(v, datetime) or isinstance(v, str):
-                        v = '"{!s}"'.format(v)
-                    q = q.replace(':{}'.format(k), str(v))
+                    if v == True:
+                        v = 1;
+                    elif v == False:
+                        v = 0;
+                q = q % paramlist
 
-            data = urllib.urlencode({'query' : q})
-            response = urllib2.urlopen(self.url, data)
-            r = json.loads(response.read())
+            r = self._send_query(q)
+
             try:
                 self.result = r['rows']
                 self.header = r['header']
@@ -134,6 +132,11 @@ class HyriseDriver(AbstractDriver):
                 print r
                 #sys.exit(-1)  
             return r
+
+        def _send_query(self, querystr):
+            data = urllib.urlencode({'query' : querystr})
+            response = urllib2.urlopen(self.url, data)
+            return json.loads(response.read())
 
         def fetchone(self, column=None):
             if self.result:
@@ -171,11 +174,11 @@ class HyriseDriver(AbstractDriver):
             return HyriseDriver.HyriseCursor(self.url)
 
         def commit(self):
-            response = self.cursor().execute({"operators": {"cm": {"type": "Commit"}}})
+            response = self.cursor()._send_query('{"operators": {"cm": {"type": "Commit"}}}')
             return response
 
         def rollback(self):
-            response = self.cursor().execute({"operators": {"rb": {"type": "Rollback"}}})
+            response = self.cursor()._send_query('{"operators": {"rb": {"type": "Rollback"}}}')
             return response
    
     def __init__(self, ddl):
@@ -257,7 +260,7 @@ class HyriseDriver(AbstractDriver):
             o_carrier_id
             ol_delivery_d
         """    
-        import pdb; pdb.set_trace()
+        ##import pdb; pdb.set_trace()
         q = self.queries["DELIVERY"]
         
         w_id = params["w_id"]   
@@ -310,7 +313,7 @@ class HyriseDriver(AbstractDriver):
             i_w_ids
             i_qtys
         """
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         q = self.queries["NEW_ORDER"]
         
         w_id = params["w_id"]
@@ -331,7 +334,7 @@ class HyriseDriver(AbstractDriver):
             ## Determine if this is an all local order or not
             all_local = all_local and i_w_ids[i] == w_id
             self.cursor.execute(q["getItemInfo"], {"i_id":i_ids[i]})
-            items.append(self.cursor.fetchone())
+            items.append(self.cursor.fetchone_as_dict())
         assert len(items) == len(i_ids)
         
         ## TPCC defines 1% of neworder gives a wrong itemid, causing rollback.
@@ -379,21 +382,21 @@ class HyriseDriver(AbstractDriver):
             ol_quantity = i_qtys[i]
 
             itemInfo = items[i]
-            i_name = itemInfo[1]
-            i_data = itemInfo[2]
-            i_price = itemInfo[0]
+            i_name = itemInfo["I_NAME"]
+            i_data = itemInfo["I_DATA"]
+            i_price = itemInfo["I_PRICE"]
 
             self.cursor.execute(q["getStockInfo"], {"2d_id":d_id, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id})
-            stockInfo = self.cursor.fetchone()
+            stockInfo = self.cursor.fetchone_as_dict()
             if len(stockInfo) == 0:
                 logging.warn("No STOCK record for (ol_i_id=%d, ol_supply_w_id=%d)" % (ol_i_id, ol_supply_w_id))
                 continue
-            s_quantity = stockInfo[0]
-            s_ytd = stockInfo[2]
-            s_order_cnt = stockInfo[3]
-            s_remote_cnt = stockInfo[4]
-            s_data = stockInfo[1]
-            s_dist_xx = stockInfo[5] # Fetches data from the s_dist_[d_id] column
+            s_quantity = stockInfo["S_QUANTITY"]
+            s_ytd = stockInfo["S_YTD"]
+            s_order_cnt = stockInfo["S_ORDER_CNT"]
+            s_remote_cnt = stockInfo["S_REMOTE_CNT"]
+            s_data = stockInfo["S_DATA"]
+            s_dist_xx = stockInfo["S_DIST_%02d" % (d_id)] # Fetches data from the s_dist_[d_id] column
 
             ## Update stock
             s_ytd += ol_quantity
@@ -444,7 +447,7 @@ class HyriseDriver(AbstractDriver):
             c_id
             c_last
         """
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         q = self.queries["ORDER_STATUS"]
         
         w_id = params["w_id"]
@@ -461,12 +464,12 @@ class HyriseDriver(AbstractDriver):
         else:
             # Get the midpoint customer's id
             self.cursor.execute(q["getCustomersByLastName"], {"w_id":w_id, "d_id":d_id, "c_last":c_last})
-            all_customers = self.cursor.fetchall()
+            all_customers = self.cursor.fetchall_as_dict()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
             index = (namecnt-1)/2
             customer = all_customers[index]
-            c_id = customer[0]
+            c_id = customer["C_ID"]
         assert len(customer) > 0
         assert c_id != None
 
@@ -493,7 +496,7 @@ class HyriseDriver(AbstractDriver):
             c_lasr()t
             h_date
         """
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         q = self.queries["PAYMENT"]
 
         w_id = params["w_id"]
@@ -505,35 +508,36 @@ class HyriseDriver(AbstractDriver):
         c_last = params["c_last"]
         h_date = params["h_date"]
 
+        #import pdb; pdb.set_trace()
         if c_id != None:
             self.cursor.execute(q["getCustomerByCustomerId"], {"c_w_id":w_id, "c_d_id":d_id, "c_id":c_id})
-            customer = self.cursor.fetchone()
+            customer = self.cursor.fetchone_as_dict()
         else:
             # Get the midpoint customer's id
-            self.cursor.execute(q["getCustomersByLastName"], {"c_w_id":w_id, "c_d_id":d_id, "c_last":d_id})
-            all_customers = self.cursor.fetchall()
+            self.cursor.execute(q["getCustomersByLastName"], {"c_w_id":w_id, "c_d_id":d_id, "c_last":c_last})
+            all_customers = self.cursor.fetchall_as_dict()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
             index = (namecnt-1)/2
             customer = all_customers[index]
-            c_id = customer[0]
+            c_id = customer["C_ID"]
         assert len(customer) > 0
-        c_balance = customer[14] - h_amount
-        c_ytd_payment = customer[15] + h_amount
-        c_payment_cnt = customer[16] + 1
-        c_data = customer[17]
+        c_balance = customer["C_BALANCE"] - h_amount
+        c_ytd_payment = customer["C_YTD_PAYMENT"] + h_amount
+        c_payment_cnt = customer["C_PAYMENT_CNT"] + 1
+        c_data = customer["C_DATA"]
 
         self.cursor.execute(q["getWarehouse"], {"w_id":w_id})
         warehouse = self.cursor.fetchone()
         
         self.cursor.execute(q["getDistrict"], {"w_id":w_id, "d_id":d_id})
         district = self.cursor.fetchone()
-        
+        #TODO: Berechnung der Amounts
         self.cursor.execute(q["updateWarehouseBalance"], {"w_ytd":h_amount, "w_id":w_id})
         self.cursor.execute(q["updateDistrictBalance"], {"d_ytd":h_amount, "w_id":w_id, "d_id":d_id})
 
         # Customer Credit Information
-        if customer[11] == constants.BAD_CREDIT:
+        if customer["C_CREDIT"] == constants.BAD_CREDIT:
             newData = " ".join(map(str, [c_id, c_d_id, c_w_id, d_id, w_id, h_amount]))
             c_data = (newData + "|" + c_data)
             if len(c_data) > constants.MAX_C_DATA: c_data = c_data[:constants.MAX_C_DATA]
@@ -566,7 +570,7 @@ class HyriseDriver(AbstractDriver):
             d_id
             threshold
         """
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         q = self.queries["STOCK_LEVEL"]
 
         w_id = params["w_id"]
@@ -592,7 +596,7 @@ class HyriseDriver(AbstractDriver):
                 "operators" : {
             """
         if not self.tables:
-            import pdb; pdb.set_trace()
+            #import pdb; pdb.set_trace()
             tbldir = os.path.join(os.environ['HYRISE_DB_PATH'], self.database)
             self.tables = [ f.rstrip('.tbl') for f in os.listdir(tbldir) if os.path.isfile(os.path.join(tbldir,f)) ]
 
