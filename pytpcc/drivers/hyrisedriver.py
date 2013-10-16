@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import logging
 import os
@@ -7,8 +8,8 @@ import urllib2
 
 from abstractdriver import *
 
-SKIP = True
-#SKIP = False
+#SKIP = True
+SKIP = False
 
 QUERY_FILES = {
   'DELIVERY': {'deleteNewOrder': 'Delivery-deleteNewOrder.json',
@@ -99,13 +100,20 @@ class HyriseDriver(AbstractDriver):
         "database": ("The path to .tbl files relative to the HYRISE table directory", "tpcc/tables/" ),
         "queries": ("The path to the JSON queries", os.path.join(os.environ['HYRISE_DB_PATH'], "tpcc/queries/" )),
         "server_url" : ("The url the JSON queries are sent to (using http requests)", "http://localhost:5000/jsonQuery"),
+        "querylog": ("Dump all query performance data into this file.", os.path.join("querydata","querylog") )
     }
     class HyriseCursor(object):
 
-        def __init__(self, url):
+        def __init__(self, url, debuglog=None):
             self.header = None
             self.result = None
             self.url = url
+            self.context = None
+            self.debuglog = "{}_{}.log".format(debuglog, datetime.now().strftime('%m_%d_%H_%M'))
+            self.counter = 0
+            if self.debuglog:
+                with open(self.debuglog,'w') as logfile:
+                    logfile.write('[')
 
         def execute(self, querystr, paramlist=None):
             q = querystr
@@ -120,22 +128,32 @@ class HyriseDriver(AbstractDriver):
 
             r = self._send_query(q)
 
-            try:
-                self.result = r['rows']
-                self.header = r['header']
-            except (KeyError, TypeError) as e:
-                print "#############RequestError################"
-                print "Request:"
-                print q
-                print "Response:"
-                print e
+            if self.debuglog:
+                try:
+                    with open(self.debuglog,'a') as logfile:
+                        logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':r['performanceData'][-1]['endTime'], 'performancedata':r['performanceData']}) + ',\n')
+                        self.counter += 1
+                except:
+                    import pdb; pdb.set_trace()
+                    pass
+
+            sys.stdout.write('.')
+            
+            if r.has_key('error'):
+                print "#######QueryError#########"
                 print r
-                #sys.exit(-1)  
-            return r
+                sys.exit(-1)
+
+            self.context = r.get('session_context', None)
+            self.result = r.get('rows', None)
+            self.header = r.get('header', None)
+            sys.stdout.flush() 
 
         def _send_query(self, querystr):
-            data = urllib.urlencode({'query' : querystr})
-            response = urllib2.urlopen(self.url, data)
+            data = {'query': querystr}
+            if self.context:
+                data['session_context'] = self.context
+            response = urllib2.urlopen(self.url, urllib.urlencode(data))
             return json.loads(response.read())
 
         def fetchone(self, column=None):
@@ -169,26 +187,33 @@ class HyriseDriver(AbstractDriver):
 
         def __init__(self, url):
             self.url = url
+            self._cursor = None
 
-        def cursor(self):
-            return HyriseDriver.HyriseCursor(self.url)
+        def cursor(self, querylog=None):
+            if not self._cursor:
+                self._cursor = HyriseDriver.HyriseCursor(self.url, querylog)
+            return self._cursor
 
         def commit(self):
             response = self.cursor()._send_query('{"operators": {"cm": {"type": "Commit"}}}')
+            self._cursor.context = None
             return response
 
         def rollback(self):
             response = self.cursor()._send_query('{"operators": {"rb": {"type": "Rollback"}}}')
+            self._cursor.context = None
             return response
    
     def __init__(self, ddl):
         super(HyriseDriver, self).__init__('hyrise', ddl)
+        self.basepath = os.environ['HYRISE_DB_PATH']
         self.database = None
         self.tables = set()
         self.query_location = None
         self.queries = {}
         self.conn = None 
         self.cursor = None
+        self.confirm = None
 
     def makeDefaultConfig(self):
         return HyriseDriver.DEFAULT_CONFIG
@@ -200,24 +225,25 @@ class HyriseDriver(AbstractDriver):
         self.database = str(config["database"])
         self.query_location = str(config["queries"])
         self.conn = HyriseDriver.HyriseConnection(str(config["server_url"]))
-        self.cursor = self.conn.cursor()
+        self.cursor = self.conn.cursor(str(config['querylog']))
      
         for query_type, query_dict in QUERY_FILES.iteritems():
             for query_name, filename in query_dict.iteritems():
                 with open(os.path.abspath(os.path.join(self.query_location, filename)), 'r') as jsonfile:
                     self.queries.setdefault(query_type,{})[query_name] = jsonfile.read()  
 
-        if config["reset"] and os.path.exists(self.database):
+        if config["reset"] and os.path.exists(os.path.join(self.basepath, self.database)):
             logging.debug("Deleting database '%s'" % self.database)
-            os.unlink(self.database)
-
-        if not SKIP:
+            for tablename in ['WAREHOUSE.tbl','DISTRICT.tbl','CUSTOMER.tbl','HISTORY.tbl','ORDER.tbl','ORDER_LINE.tbl','ITEM.tbl','STOCK.tbl']:
+                try:
+                    os.unlink(os.path.join(self.basepath, self.database, tablename))                
+                except OSError as e:
+                    if e.errno == 2: #FileNotFound
+                        print '{} not found in {}. Skipping.'.format(tablename, os.path.join(self.basepath, self.database))
             for k,v in HEADERS.iteritems():
-                filename = os.path.join(self.database, k +'.tbl')
+                filename = os.path.join(self.basepath, self.database, k +'.tbl')
                 with open(filename, 'w') as tblfile:
                     tblfile.write(v)
-        else:
-            print "SKIPPING data generation"
         
 
     def loadFinishItem(self):
@@ -233,14 +259,22 @@ class HyriseDriver(AbstractDriver):
         if len(tuples) == 0: return
         assert len(tuples[0]) == len(HEADERS[tableName].split('\n')[1].split('|')), "Headerinfo for {} is wrong".format(tableName)
 
-        filename = os.path.join(self.database, tableName +'.tbl')
-        if not SKIP:
+        filename = os.path.join(self.basepath, self.database, tableName +'.tbl')
+
+        if self.confirm == None:
+            print 'This will generate new data and append it to your data files. Are you sure? Y|[N]'
+            if (raw_input() in ['Y','y']): self.confirm = True
+            else: 
+                self.confirm = False
+                print 'Skipping Data Generation'
+        
+        if self.confirm == True:
             with open(filename, 'a') as tblfile:
+                print 'Generating data for {}...'.format(tableName)
                 for t in tuples:
                     tblfile.write('|'.join([str(i) for i in t]))
                     tblfile.write('\n')
-        else:
-            print "SKIPPING data generation"
+
         self.tables.add(tableName)
         logging.debug("Generated %d tuples for tableName %s" % (len(tuples), tableName))
         sys.stdout.write('.')
@@ -340,7 +374,7 @@ class HyriseDriver(AbstractDriver):
         ## TPCC defines 1% of neworder gives a wrong itemid, causing rollback.
         ## Note that this will happen with 1% of transactions on purpose.
         for item in items:
-            if len(item) == 0:
+            if item == None:
                 self.conn.rollback()
                 return
         ## FOR
@@ -570,7 +604,7 @@ class HyriseDriver(AbstractDriver):
             d_id
             threshold
         """
-        #import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         q = self.queries["STOCK_LEVEL"]
 
         w_id = params["w_id"]
