@@ -3,10 +3,12 @@ import json
 import logging
 import os
 import sys
-import urllib
-import urllib2
+import requests
+
+import pprint
 
 from abstractdriver import *
+from HyriseConnection import HyriseConnection
 
 #SKIP = True
 SKIP = False
@@ -99,111 +101,11 @@ class HyriseDriver(AbstractDriver):
     DEFAULT_CONFIG = {
         "database": ("The path to .tbl files relative to the HYRISE table directory", "tpcc/tables/" ),
         "queries": ("The path to the JSON queries", os.path.join(os.environ['HYRISE_DB_PATH'], "tpcc/queries/" )),
-        "server_url" : ("The url the JSON queries are sent to (using http requests)", "http://localhost:5000/jsonQuery"),
-        "querylog": ("Dump all query performance data into this file.", os.path.join("querydata","querylog") )
+        "server_url" : ("The url the JSON queries are sent to (using http requests)", "localhost"),
+        "querylog": ("Dump all query performance data into this file.", os.path.join("querydata","querylog") ),
+        "portfile": ("File that outputs the portnumber", '/home/xylander/hyrise_olli/hyrise_server.port')
     }
-    class HyriseCursor(object):
 
-        def __init__(self, url, debuglog=None):
-            self.header = None
-            self.result = None
-            self.url = url
-            self.context = None
-            self.debuglog = "{}_{}.log".format(debuglog, datetime.now().strftime('%m_%d_%H_%M'))
-            self.counter = 0
-            if self.debuglog:
-                with open(self.debuglog,'w') as logfile:
-                    logfile.write('[')
-
-        def execute(self, querystr, paramlist=None):
-            q = querystr
-            if paramlist:
-                assert isinstance(paramlist, dict)
-                for k,v in paramlist.iteritems():
-                    if v == True:
-                        v = 1;
-                    elif v == False:
-                        v = 0;
-                q = q % paramlist
-
-            r = self._send_query(q)
-
-            if self.debuglog:
-                try:
-                    with open(self.debuglog,'a') as logfile:
-                        logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':r['performanceData'][-1]['endTime'], 'performancedata':r['performanceData']}) + ',\n')
-                        self.counter += 1
-                except:
-                    import pdb; pdb.set_trace()
-                    pass
-
-            sys.stdout.write('.')
-            
-            if r.has_key('error'):
-                print "#######QueryError#########"
-                print r
-                sys.exit(-1)
-
-            self.context = r.get('session_context', None)
-            self.result = r.get('rows', None)
-            self.header = r.get('header', None)
-            sys.stdout.flush() 
-
-        def _send_query(self, querystr):
-            data = {'query': querystr}
-            if self.context:
-                data['session_context'] = self.context
-            response = urllib2.urlopen(self.url, urllib.urlencode(data))
-            return json.loads(response.read())
-
-        def fetchone(self, column=None):
-            if self.result:
-                r = self.result.pop()
-                if column:
-                    return r[self.header.index(column)]
-                return r
-            return None
-
-        def fetchone_as_dict(self):
-            if self.result:
-                return dict(zip(self.header, self.result.pop()))
-
-        def fetchall(self):
-            if self.result:
-                temp = self.result
-                self.result = None
-                return temp
-            return None
-
-        def fetchall_as_dict(self):
-            if self.result:
-                r = [dict(zip(self.header, cur_res)) for cur_res in self.result]
-                return r
-                self.result = None
-            return None
-
-
-    class HyriseConnection(object):
-
-        def __init__(self, url):
-            self.url = url
-            self._cursor = None
-
-        def cursor(self, querylog=None):
-            if not self._cursor:
-                self._cursor = HyriseDriver.HyriseCursor(self.url, querylog)
-            return self._cursor
-
-        def commit(self):
-            response = self.cursor()._send_query('{"operators": {"cm": {"type": "Commit"}}}')
-            self._cursor.context = None
-            return response
-
-        def rollback(self):
-            response = self.cursor()._send_query('{"operators": {"rb": {"type": "Rollback"}}}')
-            self._cursor.context = None
-            return response
-   
     def __init__(self, ddl):
         super(HyriseDriver, self).__init__('hyrise', ddl)
         self.basepath = os.environ['HYRISE_DB_PATH']
@@ -211,32 +113,37 @@ class HyriseDriver(AbstractDriver):
         self.tables = set()
         self.query_location = None
         self.queries = {}
-        self.conn = None 
-        self.cursor = None
+        self.conn = None
         self.confirm = None
 
     def makeDefaultConfig(self):
         return HyriseDriver.DEFAULT_CONFIG
-    
+
     def loadConfig(self, config):
         for key in HyriseDriver.DEFAULT_CONFIG.keys():
             assert key in config, "Missing parameter '%s' in %s configuration" % (key, self.name)
-        
+
         self.database = str(config["database"])
         self.query_location = str(config["queries"])
-        self.conn = HyriseDriver.HyriseConnection(str(config["server_url"]))
-        self.cursor = self.conn.cursor(str(config['querylog']))
-     
+        port = None
+        with open(str(config['portfile']),'r') as portfile:
+            port = portfile.read()
+        self.conn = HyriseConnection(host=str(config["server_url"]), port=port, debuglog=str(config['querylog']))
+
+        if config["print_load"]:
+            print self.generateTableloadJson()
+            sys.exit(-1)
+
         for query_type, query_dict in QUERY_FILES.iteritems():
             for query_name, filename in query_dict.iteritems():
                 with open(os.path.abspath(os.path.join(self.query_location, filename)), 'r') as jsonfile:
-                    self.queries.setdefault(query_type,{})[query_name] = jsonfile.read()  
+                    self.queries.setdefault(query_type,{})[query_name] = jsonfile.read()
 
         if config["reset"] and os.path.exists(os.path.join(self.basepath, self.database)):
             logging.debug("Deleting database '%s'" % self.database)
             for tablename in ['WAREHOUSE.tbl','DISTRICT.tbl','CUSTOMER.tbl','HISTORY.tbl','ORDER.tbl','ORDER_LINE.tbl','ITEM.tbl','STOCK.tbl']:
                 try:
-                    os.unlink(os.path.join(self.basepath, self.database, tablename))                
+                    os.unlink(os.path.join(self.basepath, self.database, tablename))
                 except OSError as e:
                     if e.errno == 2: #FileNotFound
                         print '{} not found in {}. Skipping.'.format(tablename, os.path.join(self.basepath, self.database))
@@ -244,7 +151,7 @@ class HyriseDriver(AbstractDriver):
                 filename = os.path.join(self.basepath, self.database, k +'.tbl')
                 with open(filename, 'w') as tblfile:
                     tblfile.write(v)
-        
+
 
     def loadFinishItem(self):
         print """"ITEM data has been passed to the driver."""
@@ -254,7 +161,7 @@ class HyriseDriver(AbstractDriver):
 
     def loadFinishDistrict(self, w_id, d_id):
         print """Data for district {} is finished.""".format(d_id)
-        
+
     def loadTuples(self, tableName, tuples):
         if len(tuples) == 0: return
         assert len(tuples[0]) == len(HEADERS[tableName].split('\n')[1].split('|')), "Headerinfo for {} is wrong".format(tableName)
@@ -264,10 +171,10 @@ class HyriseDriver(AbstractDriver):
         if self.confirm == None:
             print 'This will generate new data and append it to your data files. Are you sure? Y|[N]'
             if (raw_input() in ['Y','y']): self.confirm = True
-            else: 
+            else:
                 self.confirm = False
                 print 'Skipping Data Generation'
-        
+
         if self.confirm == True:
             with open(filename, 'a') as tblfile:
                 print 'Generating data for {}...'.format(tableName)
@@ -279,47 +186,47 @@ class HyriseDriver(AbstractDriver):
         logging.debug("Generated %d tuples for tableName %s" % (len(tuples), tableName))
         sys.stdout.write('.')
         sys.stdout.flush()
-        
+
     def executeStart(self):
-        self.cursor.execute(self.generateTableloadJson())
-        
+        loadjson = self.generateTableloadJson()
+        self.conn.query(loadjson, commit=True)
+
     def executeFinish(self):
         """Callback after the execution phase finishes"""
         return None
-        
+
     def doDelivery(self, params):
         """Execute DELIVERY Transaction
         Parameters Dict:
             w_id
             o_carrier_id
             ol_delivery_d
-        """    
-        ##import pdb; pdb.set_trace()
+        """
         q = self.queries["DELIVERY"]
-        
-        w_id = params["w_id"]   
+
+        w_id = params["w_id"]
         o_carrier_id = params["o_carrier_id"]
         ol_delivery_d = params["ol_delivery_d"]
 
         result = [ ]
         for d_id in range(1, constants.DISTRICTS_PER_WAREHOUSE+1):
-            self.cursor.execute(q["getNewOrder"], {'d_id':d_id, 'w_id':w_id})
-            newOrder = self.cursor.fetchone_as_dict()
+            self.conn.query(q["getNewOrder"], {'d_id':d_id, 'w_id':w_id})
+            newOrder = self.conn.fetchone_as_dict()
             if newOrder == None:
                 ## No orders for this district: skip it. Note: This must be reported if > 1%
                 continue
             assert len(newOrder) > 0
             no_o_id = newOrder['NO_O_ID']
-            
-            self.cursor.execute(q["getCId"], {'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
-            c_id = self.cursor.fetchone_as_dict()['C_ID']
-            
-            self.cursor.execute(q["sumOLAmount"], {'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
-            ol_total = self.cursor.fetchone_as_dict()['C_ID']
 
-            self.cursor.execute(q["deleteNewOrder"], {'no_d_id':d_id, 'no_w_id':w_id, 'no_o_id':no_o_id})
-            self.cursor.execute(q["updateOrders"], {'o_carrier_id':o_carrier_id, 'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
-            self.cursor.execute(q["updateOrderLine"], {'date':ol_delivery_d, 'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
+            self.conn.query(q["getCId"], {'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
+            c_id = self.conn.fetchone_as_dict()['C_ID']
+
+            self.conn.query(q["sumOLAmount"], {'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
+            ol_total = self.conn.fetchone_as_dict()['C_ID']
+
+            self.conn.query(q["deleteNewOrder"], {'no_d_id':d_id, 'no_w_id':w_id, 'no_o_id':no_o_id})
+            self.conn.query(q["updateOrders"], {'o_carrier_id':o_carrier_id, 'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
+            self.conn.query(q["updateOrderLine"], {'date':ol_delivery_d, 'no_o_id':no_o_id, 'd_id':d_id, 'w_id':w_id})
 
             # These must be logged in the "result file" according to TPC-C 2.7.2.2 (page 39)
             # We remove the queued time, completed time, w_id, and o_carrier_id: the client can figure
@@ -328,14 +235,14 @@ class HyriseDriver(AbstractDriver):
             assert ol_total != None, "ol_total is NULL: there are no order lines. This should not happen"
             assert ol_total > 0.0
 
-            self.cursor.execute(q["updateCustomer"], {'ol_total':ol_total, 'c_id':c_id, 'd_id':d_id, 'w_id':w_id})
+            self.conn.query(q["updateCustomer"], {'ol_total':ol_total, 'c_id':c_id, 'd_id':d_id, 'w_id':w_id})
 
             result.append((d_id, no_o_id))
         ## FOR
 
         self.conn.commit()
         return result
-    
+
     def doNewOrder(self, params):
         """Execute NEW_ORDER Transaction
         Parameters Dict:
@@ -347,9 +254,8 @@ class HyriseDriver(AbstractDriver):
             i_w_ids
             i_qtys
         """
-        #import pdb; pdb.set_trace()
         q = self.queries["NEW_ORDER"]
-        
+
         w_id = params["w_id"]
         d_id = params["d_id"]
         c_id = params["c_id"]
@@ -357,7 +263,7 @@ class HyriseDriver(AbstractDriver):
         i_ids = params["i_ids"]
         i_w_ids = params["i_w_ids"]
         i_qtys = params["i_qtys"]
-            
+
         assert len(i_ids) > 0
         assert len(i_ids) == len(i_w_ids)
         assert len(i_ids) == len(i_qtys)
@@ -367,10 +273,10 @@ class HyriseDriver(AbstractDriver):
         for i in range(len(i_ids)):
             ## Determine if this is an all local order or not
             all_local = all_local and i_w_ids[i] == w_id
-            self.cursor.execute(q["getItemInfo"], {"i_id":i_ids[i]})
-            items.append(self.cursor.fetchone_as_dict())
+            self.conn.query(q["getItemInfo"], {"i_id":i_ids[i]})
+            items.append(self.conn.fetchone_as_dict())
         assert len(items) == len(i_ids)
-        
+
         ## TPCC defines 1% of neworder gives a wrong itemid, causing rollback.
         ## Note that this will happen with 1% of transactions on purpose.
         for item in items:
@@ -378,20 +284,20 @@ class HyriseDriver(AbstractDriver):
                 self.conn.rollback()
                 return
         ## FOR
-        
+
         ## ----------------
         ## Collect Information from WAREHOUSE, DISTRICT, and CUSTOMER
         ## ----------------
-        self.cursor.execute(q["getWarehouseTaxRate"], {"w_id":w_id})
-        w_tax = self.cursor.fetchone_as_dict()['W_TAX']
-        
-        self.cursor.execute(q["getDistrict"], {"d_id":d_id, "w_id":w_id})
-        district_info = self.cursor.fetchone_as_dict()
+        self.conn.query(q["getWarehouseTaxRate"], {"w_id":w_id})
+        w_tax = self.conn.fetchone_as_dict()['W_TAX']
+
+        self.conn.query(q["getDistrict"], {"d_id":d_id, "w_id":w_id})
+        district_info = self.conn.fetchone_as_dict()
         d_tax = district_info['D_TAX']
         d_next_o_id = district_info['D_NEXT_O_ID']
-        
-        self.cursor.execute(q["getCustomer"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
-        customer_info = self.cursor.fetchone_as_dict()
+
+        self.conn.query(q["getCustomer"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
+        customer_info = self.conn.fetchone_as_dict()
         c_discount = customer_info['C_DISCOUNT']
 
         ## ----------------
@@ -399,10 +305,10 @@ class HyriseDriver(AbstractDriver):
         ## ----------------
         ol_cnt = len(i_ids)
         o_carrier_id = constants.NULL_CARRIER_ID
-        
-        self.cursor.execute(q["incrementNextOrderId"], {"d_next_o_id":d_next_o_id + 1, "d_id":d_id, "w_id":w_id})
-        self.cursor.execute(q["createOrder"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id, "c_id":c_id, "date":o_entry_d, "o_carrier_id":o_carrier_id, "o_ol_cnt":ol_cnt, "all_local":all_local})
-        self.cursor.execute(q["createNewOrder"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id})
+
+        self.conn.query(q["incrementNextOrderId"], {"d_next_o_id":d_next_o_id + 1, "d_id":d_id, "w_id":w_id})
+        self.conn.query(q["createOrder"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id, "c_id":c_id, "date":o_entry_d, "o_carrier_id":o_carrier_id, "o_ol_cnt":ol_cnt, "all_local":all_local})
+        self.conn.query(q["createNewOrder"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id})
 
         ## ----------------
         ## Insert Order Item Information
@@ -420,8 +326,8 @@ class HyriseDriver(AbstractDriver):
             i_data = itemInfo["I_DATA"]
             i_price = itemInfo["I_PRICE"]
 
-            self.cursor.execute(q["getStockInfo"], {"2d_id":d_id, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id})
-            stockInfo = self.cursor.fetchone_as_dict()
+            self.conn.query(q["getStockInfo"], {"2d_id":d_id, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id})
+            stockInfo = self.conn.fetchone_as_dict()
             if len(stockInfo) == 0:
                 logging.warn("No STOCK record for (ol_i_id=%d, ol_supply_w_id=%d)" % (ol_i_id, ol_supply_w_id))
                 continue
@@ -439,10 +345,10 @@ class HyriseDriver(AbstractDriver):
             else:
                 s_quantity = s_quantity + 91 - ol_quantity
             s_order_cnt += 1
-            
+
             if ol_supply_w_id != w_id: s_remote_cnt += 1
 
-            self.cursor.execute(q["updateStock"], {"s_quantity":s_quantity, "s_ytd":s_ytd, "s_order_cnt":s_order_cnt, "s_remote_cnt":s_remote_cnt, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id})
+            self.conn.query(q["updateStock"], {"s_quantity":s_quantity, "s_ytd":s_ytd, "s_order_cnt":s_order_cnt, "s_remote_cnt":s_remote_cnt, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id})
 
             if i_data.find(constants.ORIGINAL_STRING) != -1 and s_data.find(constants.ORIGINAL_STRING) != -1:
                 brand_generic = 'B'
@@ -453,12 +359,12 @@ class HyriseDriver(AbstractDriver):
             ol_amount = ol_quantity * i_price
             total += ol_amount
 
-            self.cursor.execute(q["createOrderLine"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id, "ol_number":ol_number, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id, "date":o_entry_d, "ol_quantity":ol_quantity, "ol_amount":ol_amount, "ol_dist_info":s_dist_xx})
+            self.conn.query(q["createOrderLine"], {"o_id":d_next_o_id, "d_id":d_id, "w_id":w_id, "ol_number":ol_number, "ol_i_id":ol_i_id, "ol_supply_w_id":ol_supply_w_id, "date":o_entry_d, "ol_quantity":ol_quantity, "ol_amount":ol_amount, "ol_dist_info":s_dist_xx})
 
             ## Add the info to be returned
             item_data.append( (i_name, s_quantity, brand_generic, i_price, ol_amount) )
         ## FOR
-        
+
         ## Commit!
         self.conn.commit()
 
@@ -470,7 +376,7 @@ class HyriseDriver(AbstractDriver):
 
         ## Pack up values the client is missing (see TPC-C 2.4.3.5)
         misc = [ (w_tax, d_tax, d_next_o_id, total) ]
-        
+
         return [ customer_info, misc, item_data ]
 
     def doOrderStatus(self, params):
@@ -481,24 +387,23 @@ class HyriseDriver(AbstractDriver):
             c_id
             c_last
         """
-        #import pdb; pdb.set_trace()
         q = self.queries["ORDER_STATUS"]
-        
+
         w_id = params["w_id"]
         d_id = params["d_id"]
         c_id = params["c_id"]
         c_last = params["c_last"]
-        
+
         assert w_id, pformat(params)
         assert d_id, pformat(params)
 
         if c_id != None:
-            self.cursor.execute(q["getCustomerByCustomerId"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
-            customer = self.cursor.fetchone()
+            self.conn.query(q["getCustomerByCustomerId"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
+            customer = self.conn.fetchone()
         else:
             # Get the midpoint customer's id
-            self.cursor.execute(q["getCustomersByLastName"], {"w_id":w_id, "d_id":d_id, "c_last":c_last})
-            all_customers = self.cursor.fetchall_as_dict()
+            self.conn.query(q["getCustomersByLastName"], {"w_id":w_id, "d_id":d_id, "c_last":c_last})
+            all_customers = self.conn.fetchall_as_dict()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
             index = (namecnt-1)/2
@@ -507,11 +412,11 @@ class HyriseDriver(AbstractDriver):
         assert len(customer) > 0
         assert c_id != None
 
-        self.cursor.execute(q["getLastOrder"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
-        order = self.cursor.fetchone()
+        self.conn.query(q["getLastOrder"], {"w_id":w_id, "d_id":d_id, "c_id":c_id})
+        order = self.conn.fetchone()
         if order:
-            self.cursor.execute(q["getOrderLines"], {"w_id":w_id, "d_id":d_id, "o_id":order[0]})
-            orderLines = self.cursor.fetchall()
+            self.conn.query(q["getOrderLines"], {"w_id":w_id, "d_id":d_id, "o_id":order[0]})
+            orderLines = self.conn.fetchall()
         else:
             orderLines = [ ]
 
@@ -530,7 +435,6 @@ class HyriseDriver(AbstractDriver):
             c_lasr()t
             h_date
         """
-        #import pdb; pdb.set_trace()
         q = self.queries["PAYMENT"]
 
         w_id = params["w_id"]
@@ -544,12 +448,12 @@ class HyriseDriver(AbstractDriver):
 
         #import pdb; pdb.set_trace()
         if c_id != None:
-            self.cursor.execute(q["getCustomerByCustomerId"], {"c_w_id":w_id, "c_d_id":d_id, "c_id":c_id})
-            customer = self.cursor.fetchone_as_dict()
+            self.conn.query(q["getCustomerByCustomerId"], {"c_w_id":w_id, "c_d_id":d_id, "c_id":c_id})
+            customer = self.conn.fetchone_as_dict()
         else:
             # Get the midpoint customer's id
-            self.cursor.execute(q["getCustomersByLastName"], {"c_w_id":w_id, "c_d_id":d_id, "c_last":c_last})
-            all_customers = self.cursor.fetchall_as_dict()
+            self.conn.query(q["getCustomersByLastName"], {"c_w_id":w_id, "c_d_id":d_id, "c_last":c_last})
+            all_customers = self.conn.fetchall_as_dict()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
             index = (namecnt-1)/2
@@ -561,29 +465,29 @@ class HyriseDriver(AbstractDriver):
         c_payment_cnt = customer["C_PAYMENT_CNT"] + 1
         c_data = customer["C_DATA"]
 
-        self.cursor.execute(q["getWarehouse"], {"w_id":w_id})
-        warehouse = self.cursor.fetchone()
-        
-        self.cursor.execute(q["getDistrict"], {"w_id":w_id, "d_id":d_id})
-        district = self.cursor.fetchone()
+        self.conn.query(q["getWarehouse"], {"w_id":w_id})
+        warehouse = self.conn.fetchone()
+
+        self.conn.query(q["getDistrict"], {"w_id":w_id, "d_id":d_id})
+        district = self.conn.fetchone()
         #TODO: Berechnung der Amounts
-        self.cursor.execute(q["updateWarehouseBalance"], {"w_ytd":h_amount, "w_id":w_id})
-        self.cursor.execute(q["updateDistrictBalance"], {"d_ytd":h_amount, "w_id":w_id, "d_id":d_id})
+        self.conn.query(q["updateWarehouseBalance"], {"w_ytd":h_amount, "w_id":w_id})
+        self.conn.query(q["updateDistrictBalance"], {"d_ytd":h_amount, "w_id":w_id, "d_id":d_id})
 
         # Customer Credit Information
         if customer["C_CREDIT"] == constants.BAD_CREDIT:
             newData = " ".join(map(str, [c_id, c_d_id, c_w_id, d_id, w_id, h_amount]))
             c_data = (newData + "|" + c_data)
             if len(c_data) > constants.MAX_C_DATA: c_data = c_data[:constants.MAX_C_DATA]
-            self.cursor.execute(q["updateBCCustomer"], {"c_balance":c_balance, "c_ytd_payment":c_ytd_payment, "c_payment_cnt":c_payment_cnt, "c_data":c_data, "c_w_id":c_w_id, "c_d_id":c_d_id, "c_id":c_id})
+            self.conn.query(q["updateBCCustomer"], {"c_balance":c_balance, "c_ytd_payment":c_ytd_payment, "c_payment_cnt":c_payment_cnt, "c_data":c_data, "c_w_id":c_w_id, "c_d_id":c_d_id, "c_id":c_id})
         else:
             c_data = ""
-            self.cursor.execute(q["updateGCCustomer"], {"c_balance":c_balance, "c_ytd_payment":c_ytd_payment, "c_payment_cnt":c_payment_cnt, "c_w_id":c_w_id, "c_d_id":c_d_id, "c_id":c_id})
+            self.conn.query(q["updateGCCustomer"], {"c_balance":c_balance, "c_ytd_payment":c_ytd_payment, "c_payment_cnt":c_payment_cnt, "c_w_id":c_w_id, "c_d_id":c_d_id, "c_id":c_id})
 
         # Concatenate w_name, four spaces, d_name
         h_data = "%s    %s" % (warehouse[0], district[0])
         # Create the history record
-        self.cursor.execute(q["insertHistory"], {"c_id":c_id, "c_d_id":c_d_id, "c_w_id":c_w_id, "d_id":d_id, "w_id":w_id, "h_date":h_date, "h_amount":h_amount, "h_data":h_data})
+        self.conn.query(q["insertHistory"], {"c_id":c_id, "c_d_id":c_d_id, "c_w_id":c_w_id, "d_id":d_id, "w_id":w_id, "h_date":h_date, "h_amount":h_amount, "h_data":h_data})
 
         self.conn.commit()
 
@@ -604,23 +508,22 @@ class HyriseDriver(AbstractDriver):
             d_id
             threshold
         """
-        import pdb; pdb.set_trace()
         q = self.queries["STOCK_LEVEL"]
 
         w_id = params["w_id"]
         d_id = params["d_id"]
         threshold = params["threshold"]
-        
-        self.cursor.execute(q["getOId"], {"w_id":w_id, "d_id":d_id})
-        result = self.cursor.fetchone()
+
+        self.conn.query(q["getOId"], {"w_id":w_id, "d_id":d_id})
+        result = self.conn.fetchone()
         assert result
         o_id = result[0]
-        
-        self.cursor.execute(q["getStockCount"], {"w_id":w_id, "d_id":d_id, "o_id1":o_id, "o_id2":(o_id - 20), "w_id":w_id, "threshold":threshold})
-        result = self.cursor.fetchone()
-        
+
+        self.conn.query(q["getStockCount"], {"w_id":w_id, "d_id":d_id, "o_id1":o_id, "o_id2":(o_id - 20), "w_id":w_id, "threshold":threshold})
+        result = self.conn.fetchone()
+
         self.conn.commit()
-        
+
         return int(result[0])
 
     def generateTableloadJson(self):
@@ -653,7 +556,7 @@ class HyriseDriver(AbstractDriver):
         }},
     "edges": [{}]
     }}""".format(',\n'.join(parts),edgestr)
-                
+
         return loadstr
 
 ## CLAS
