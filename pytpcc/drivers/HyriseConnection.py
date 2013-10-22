@@ -38,7 +38,7 @@ class HyriseConnection(object):
         if self.debuglog:
             try:
                 with open(self.debuglog,'a') as logfile:
-                    logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':json_response['performanceData'][-1]['endTime'], 'performancedata':json_response['performanceData']}) + ',\n')
+                    logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':json_response['.performanceData'][-1]['endTime'], 'performancedata':json_response['performanceData']}) + ',\n')
                     self.counter += 1
             except:
                 import pdb; pdb.set_trace()

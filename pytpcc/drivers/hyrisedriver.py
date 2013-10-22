@@ -98,19 +98,21 @@ INTEGER|STRING|STRING|STRING|STRING|STRING|STRING|FLOAT|FLOAT
 
 
 class HyriseDriver(AbstractDriver):
+    assert os.environ.has_key('HYRISE_DB_PATH'), "Environment variable HYRISE_DB_PATH is not set. Set this variable to the location of the HYRISE table directory"
     DEFAULT_CONFIG = {
-        "database": ("The path to .tbl files relative to the HYRISE table directory", "tpcc/tables/" ),
-        "queries": ("The path to the JSON queries", os.path.join(os.environ['HYRISE_DB_PATH'], "tpcc/queries/" )),
+        #"database": ("The path to .tbl files relative to the HYRISE table directory", os.path.join(os.environ['HYRISE_DB_PATH'], 'tpcc', 'tables')),
+        "database": ("The path to .tbl files relative to the HYRISE table directory", os.path.join('tpcc', 'tables')),
+        "queries": ("The path to the JSON queries", os.path.join(os.getcwd(), 'queries')),
         "server_url" : ("The url the JSON queries are sent to (using http requests)", "localhost"),
         "querylog": ("Dump all query performance data into this file.", os.path.join("querydata","querylog") ),
-        "portfile": ("File that outputs the portnumber", '/home/xylander/hyrise_olli/hyrise_server.port')
+        "portfile": ("File that outputs the portnumber", os.path.join(os.environ['HYRISE_DB_PATH'], '..', 'hyrise_server.port'))
     }
 
     def __init__(self, ddl):
         super(HyriseDriver, self).__init__('hyrise', ddl)
         self.basepath = os.environ['HYRISE_DB_PATH']
         self.database = None
-        self.tables = set()
+        self.tables = constants.ALL_TABLES
         self.query_location = None
         self.queries = {}
         self.conn = None
@@ -126,6 +128,8 @@ class HyriseDriver(AbstractDriver):
         self.database = str(config["database"])
         self.query_location = str(config["queries"])
         port = None
+        if config.has_key('port'):
+            port = str(config['port'])
         with open(str(config['portfile']),'r') as portfile:
             port = portfile.read()
         self.conn = HyriseConnection(host=str(config["server_url"]), port=port, debuglog=str(config['querylog']))
@@ -182,14 +186,13 @@ class HyriseDriver(AbstractDriver):
                     tblfile.write('|'.join([str(i) for i in t]))
                     tblfile.write('\n')
 
-        self.tables.add(tableName)
         logging.debug("Generated %d tuples for tableName %s" % (len(tuples), tableName))
         sys.stdout.write('.')
         sys.stdout.flush()
 
     def executeStart(self):
         loadjson = self.generateTableloadJson()
-        self.conn.query(loadjson, commit=True)
+        self.conn.query(loadjson)
 
     def executeFinish(self):
         """Callback after the execution phase finishes"""
@@ -532,11 +535,6 @@ class HyriseDriver(AbstractDriver):
             {
                 "operators" : {
             """
-        if not self.tables:
-            #import pdb; pdb.set_trace()
-            tbldir = os.path.join(os.environ['HYRISE_DB_PATH'], self.database)
-            self.tables = [ f.rstrip('.tbl') for f in os.listdir(tbldir) if os.path.isfile(os.path.join(tbldir,f)) ]
-
         for i ,tblname in enumerate(self.tables):
             parts.append("""
         "{}": {{
@@ -547,15 +545,16 @@ class HyriseDriver(AbstractDriver):
             """.format(i, tblname, os.path.join(self.database, tblname))
             )
 
-        edgestr = ','.join('["{}","{}"]'.format(j,j+1) for j in range(len(self.tables)-1))
+        edgestr = ','.join('["{}","{}"]'.format(j,j+1) for j in range(len(self.tables)))
 
         loadstr = """
 {{
     "operators" : {{
-        {}
+        {},
+        "{}": {{"type" : "Commit"}}
         }},
     "edges": [{}]
-    }}""".format(',\n'.join(parts),edgestr)
+    }}""".format(',\n'.join(parts), len(self.tables), edgestr)
 
         return loadstr
 
