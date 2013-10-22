@@ -117,6 +117,7 @@ class HyriseDriver(AbstractDriver):
         self.queries = {}
         self.conn = None
         self.confirm = None
+        self.debug = False
 
     def makeDefaultConfig(self):
         return HyriseDriver.DEFAULT_CONFIG
@@ -130,9 +131,14 @@ class HyriseDriver(AbstractDriver):
         port = None
         if config.has_key('port'):
             port = str(config['port'])
-        with open(str(config['portfile']),'r') as portfile:
-            port = portfile.read()
-        self.conn = HyriseConnection(host=str(config["server_url"]), port=port, debuglog=str(config['querylog']))
+        else:
+            with open(str(config['portfile']),'r') as portfile:
+                port = portfile.read()
+
+        if config.has_key('querylog'):
+            debuglog = config['querylog']
+            self.debug = True
+        self.conn = HyriseConnection(host=str(config["server_url"]), port=port, debuglog=debuglog)
 
         if config["print_load"]:
             print self.generateTableloadJson()
@@ -205,6 +211,10 @@ class HyriseDriver(AbstractDriver):
             o_carrier_id
             ol_delivery_d
         """
+        if self.debug:
+            sys.stdout.write('D')
+            sys.stdout.flush()
+
         q = self.queries["DELIVERY"]
 
         w_id = params["w_id"]
@@ -257,6 +267,10 @@ class HyriseDriver(AbstractDriver):
             i_w_ids
             i_qtys
         """
+        if self.debug:
+            sys.stdout.write('N')
+            sys.stdout.flush()
+
         q = self.queries["NEW_ORDER"]
 
         w_id = params["w_id"]
@@ -390,6 +404,10 @@ class HyriseDriver(AbstractDriver):
             c_id
             c_last
         """
+        if self.debug:
+            sys.stdout.write('O')
+            sys.stdout.flush()
+
         q = self.queries["ORDER_STATUS"]
 
         w_id = params["w_id"]
@@ -438,6 +456,10 @@ class HyriseDriver(AbstractDriver):
             c_lasr()t
             h_date
         """
+        if self.debug:
+            sys.stdout.write('P')
+            sys.stdout.flush()
+
         q = self.queries["PAYMENT"]
 
         w_id = params["w_id"]
@@ -511,6 +533,10 @@ class HyriseDriver(AbstractDriver):
             d_id
             threshold
         """
+        if self.debug:
+            sys.stdout.write('S')
+            sys.stdout.flush()
+
         q = self.queries["STOCK_LEVEL"]
 
         w_id = params["w_id"]
@@ -524,10 +550,8 @@ class HyriseDriver(AbstractDriver):
 
         self.conn.query(q["getStockCount"], {"w_id":w_id, "d_id":d_id, "o_id1":o_id, "o_id2":(o_id - 20), "w_id":w_id, "threshold":threshold})
         result = self.conn.fetchone()
-
         self.conn.commit()
-
-        return int(result[0])
+        return int(result[0]) if result else 0
 
     def generateTableloadJson(self):
         parts = []

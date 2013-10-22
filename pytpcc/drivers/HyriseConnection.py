@@ -13,11 +13,11 @@ class HyriseConnection(object):
         self._url = "http://%s:%s/" % (host, port)
         self.header = None
         self._result = None
-        self.debuglog = "{}_{}.log".format(debuglog, datetime.now().strftime('%m_%d_%H_%M'))
         self.last_query = None
+        self.debug = "{}_{}.log".format(debuglog, datetime.now().strftime('%m_%d_%H_%M')) if debuglog else None
         self.counter = 0
-        if self.debuglog:
-            with open(self.debuglog,'w') as logfile:
+        if self.debug:
+            with open(self.debug,'w') as logfile:
                 logfile.write('[')
 
     def query(self, querystr, paramlist=None, commit=False):
@@ -35,10 +35,10 @@ class HyriseConnection(object):
         r = self.query_raw(query=q, context=self._context, commit=commit)
         json_response = json.loads(r)
 
-        if self.debuglog:
+        if self.debug:
             try:
-                with open(self.debuglog,'a') as logfile:
-                    logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':json_response['.performanceData'][-1]['endTime'], 'performancedata':json_response['performanceData']}) + ',\n')
+                with open(self.debug,'a') as logfile:
+                    logfile.write(json.dumps({'id':self.counter, 'query':q, 'time':json_response['performanceData'][-1]['endTime'], 'performancedata':json_response['performanceData']}) + ',\n')
                     self.counter += 1
             except:
                 import pdb; pdb.set_trace()
