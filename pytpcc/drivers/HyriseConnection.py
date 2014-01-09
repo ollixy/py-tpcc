@@ -76,7 +76,7 @@ class HyriseConnection(object):
             raise Exception("Should not commit without running context")
         r = self.query("""{"operators": {"cm": {"type": "Commit"}}}""")
         self._context = None
-        return r
+        return  r
 
     def rollback(self):
         if not self._context:
